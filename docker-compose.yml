@@ -1,0 +1,168 @@
+services:
+  postgres-account:
+    image: postgres:16-alpine
+    container_name: postgres-account
+    environment:
+      POSTGRES_DB: accountdb
+      POSTGRES_USER: bank
+      POSTGRES_PASSWORD: bank
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-account-data:/var/lib/postgresql/data
+    networks:
+      - bank-network
+
+  postgres-transaction:
+    image: postgres:16-alpine
+    container_name: postgres-transaction
+    environment:
+      POSTGRES_DB: transactiondb
+      POSTGRES_USER: bank
+      POSTGRES_PASSWORD: bank
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres-transaction-data:/var/lib/postgresql/data
+    networks:
+      - bank-network
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - bank-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    ports:
+      - "29092:29092"
+    networks:
+      - bank-network
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.1.2
+    container_name: keycloak
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    ports:
+      - "9080:8080"
+    networks:
+      - bank-network
+
+  discovery:
+    build:
+      context: .
+      dockerfile: discovery/Dockerfile
+    container_name: discovery
+    ports:
+      - "8761:8761"
+    networks:
+      - bank-network
+
+  account-service:
+    build:
+      context: .
+      dockerfile: account-service/Dockerfile
+    container_name: account-service
+    depends_on:
+      - postgres-account
+      - discovery
+    environment:
+      DB_HOST: postgres-account
+      DB_PORT: 5432
+      DB_NAME: accountdb
+      DB_USERNAME: bank
+      DB_PASSWORD: bank
+      EUREKA_URL: http://discovery:8761/eureka
+    ports:
+      - "8081:8081"
+    networks:
+      - bank-network
+
+  transaction-service:
+    build:
+      context: .
+      dockerfile: transaction-service/Dockerfile
+    container_name: transaction-service
+    depends_on:
+      - postgres-transaction
+      - kafka
+      - discovery
+      - account-service
+    environment:
+      DB_HOST: postgres-transaction
+      DB_PORT: 5432
+      DB_NAME: transactiondb
+      DB_USERNAME: bank
+      DB_PASSWORD: bank
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      EUREKA_URL: http://discovery:8761/eureka
+    ports:
+      - "8082:8082"
+    networks:
+      - bank-network
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: notification-service/Dockerfile
+    container_name: notification-service
+    depends_on:
+      - kafka
+      - discovery
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      EUREKA_URL: http://discovery:8761/eureka
+    ports:
+      - "8083:8083"
+    networks:
+      - bank-network
+
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    container_name: gateway
+    depends_on:
+      - discovery
+      - account-service
+      - transaction-service
+      - keycloak
+    environment:
+      EUREKA_URL: http://discovery:8761/eureka
+      JWT_ISSUER_URI: http://keycloak:8080/realms/bank-realm
+      JWT_JWK_SET_URI: http://keycloak:8080/realms/bank-realm/protocol/openid-connect/certs
+    ports:
+      - "8080:8080"
+    networks:
+      - bank-network
+
+networks:
+  bank-network:
+    driver: bridge
+
+volumes:
+  postgres-account-data:
+  postgres-transaction-data:
